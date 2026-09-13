@@ -1,0 +1,228 @@
+// CipherVault - End-to-End Encrypted File Sharing Platform
+// Database schema implementing the security model from SECURITY.md Section 3
+//
+// Key design decisions:
+// - FileKeyGrant is separate from FileShare: cryptographic material vs permission logic
+// - All IDs are UUIDs (non-sequential) to prevent enumeration
+// - Cascade deletes on file-related models ensure no orphaned crypto material
+// - Every foreign key and query-pattern field is indexed
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum FileStatus {
+  PENDING
+  COMPLETE
+  FAILED
+  DELETED
+}
+
+model User {
+  id                        String   @id @default(uuid())
+  email                     String   @unique
+  role                      Role     @default(USER)
+
+  // Argon2id hash of the client-derived authKey (HKDF from masterKey)
+  // The server NEVER receives the raw password or masterKey
+  authHash                  String
+
+  // PBKDF2 salt used client-side to derive masterKey from password
+  // Not secret — sent to client during login salt lookup
+  authSalt                  String
+
+  // Stored per-user so iterations can be upgraded without breaking existing accounts
+  kdfIterations             Int      @default(600000)
+
+  // RSA-OAEP 3072-bit public key in SPKI format, base64-encoded
+  // Not secret — other users need it to share files with this user
+  publicKey                 String
+
+  // RSA private key encrypted (AES-256-GCM) under a key derived from masterKey
+  // via HKDF(masterKey, info="ciphervault-privkey-wrap-v1")
+  // Server only ever stores/serves the wrapped (encrypted) form
+  wrappedPrivateKey         String
+  wrappedPrivateKeyIv       String
+
+  // Private key wrapped a second time under the one-time recovery key
+  // Recovery key is shown to user exactly once at registration
+  recoveryWrappedPrivateKey String?
+  recoveryWrappedKeyIv      String?
+
+  isDisabled                Boolean  @default(false)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  refreshTokens RefreshToken[]
+  ownedFiles    File[]         @relation("Owner")
+  keyGrants     FileKeyGrant[]
+  auditLogs     AuditLog[]
+}
+
+model RefreshToken {
+  id             String    @id @default(uuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // SHA-256 hash of the actual refresh token
+  // Raw token is NEVER stored — only its hash for lookup/verification
+  tokenHash      String    @unique
+
+  // Rotation chain identifier for reuse detection
+  // If a revoked token in this family is reused, ALL tokens in the family are revoked
+  familyId       String
+
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime
+  revokedAt      DateTime?
+
+  // Hash of the token that replaced this one (for audit trail)
+  replacedByHash String?
+
+  // Recorded for audit/abuse detection
+  ipAddress      String?
+  userAgent      String?
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+model File {
+  id                String     @id @default(uuid())
+  ownerId           String
+  owner             User       @relation("Owner", fields: [ownerId], references: [id])
+
+  // Server-generated UUID-based S3 key — never derived from user-supplied filenames
+  // to prevent path traversal attacks
+  s3Key             String     @unique
+
+  // AES-256-GCM ciphertext of the file manifest (filename, mimetype, size, chunk map)
+  // Stored in Postgres (not S3) so file listing never requires S3 round-trips
+  // The server CANNOT read original filenames or MIME types — they're encrypted
+  encryptedManifest Bytes
+
+  // IV used to encrypt the manifest
+  manifestIv        String
+
+  // Total ciphertext size on S3 (not the original plaintext size, which is encrypted in the manifest)
+  sizeBytes         BigInt
+
+  status            FileStatus @default(PENDING)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  deletedAt         DateTime?
+
+  // S3 multipart upload tracking
+  s3UploadId        String?
+
+  keyGrants  FileKeyGrant[]
+  shares     FileShare[]
+  shareLinks ShareLink[]
+
+  @@index([ownerId])
+  @@index([status])
+}
+
+model FileKeyGrant {
+  id              String   @id @default(uuid())
+  fileId          String
+  file            File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // File DEK (Data Encryption Key) wrapped with THIS user's RSA-OAEP public key
+  // Each user who can access the file has their own wrapped copy of the DEK
+  // The server never sees an unwrapped DEK
+  wrappedKey      String
+
+  grantedByUserId String
+  grantedAt       DateTime @default(now())
+
+  // One wrapped key per user per file — enforced at DB level
+  @@unique([fileId, userId])
+  @@index([userId])
+}
+
+model FileShare {
+  id              String    @id @default(uuid())
+  fileId          String
+  file            File      @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  granteeUserId   String
+
+  // Permission flags — granular access control
+  canView         Boolean   @default(true)
+  canDownload     Boolean   @default(true)
+  canReshare      Boolean   @default(false)
+
+  createdByUserId String
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime?
+  revokedAt       DateTime?
+
+  // One share per user per file — prevents duplicate permission rows
+  @@unique([fileId, granteeUserId])
+  @@index([granteeUserId])
+}
+
+model ShareLink {
+  id              String    @id @default(uuid())
+  fileId          String
+  file            File      @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  // DEK wrapped with a key derived from the URL-fragment secret (+ optional password)
+  // The fragment secret NEVER reaches the server — it stays in the browser URL fragment
+  wrappedKey      String
+
+  // Argon2id hash of the optional password
+  // This is a UX/rate-limiting convenience gate ONLY — NOT the real cryptographic gate
+  // The actual gate is that the correct password is needed client-side to derive
+  // the key that unwraps the DEK
+  passwordHash    String?
+
+  canDownload     Boolean   @default(true)
+  maxUses         Int?
+  useCount        Int       @default(0)
+  createdByUserId String
+  createdAt       DateTime  @default(now())
+  expiresAt       DateTime?
+  revokedAt       DateTime?
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+
+  // Nullable for anonymous share-link access events
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+
+  // Event type from the defined set — see audit service for the full list
+  // NEVER log: passwords, authKeys, JWT secrets, unwrapped keys, raw refresh tokens,
+  // or any plaintext file content/names
+  eventType  String
+
+  // ID of the resource this event relates to (file, share, user, etc.)
+  resourceId String?
+
+  success    Boolean
+  ipAddress  String?
+  userAgent  String?
+
+  // Additional non-sensitive context as JSON
+  metadata   Json?
+
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([eventType])
+  @@index([createdAt])
+}

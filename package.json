@@ -1,0 +1,25 @@
+{
+  "name": "ciphervault",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
+    "build": "npm run build -w packages/shared && npm run build -w packages/crypto && npm run build -w apps/api && npm run build -w apps/web",
+    "lint": "npm run lint -w packages/shared -w packages/crypto -w apps/api -w apps/web",
+    "typecheck": "npm run typecheck -w packages/shared -w packages/crypto -w apps/api -w apps/web",
+    "test": "npm run test -w packages/crypto -w apps/api",
+    "test:unit": "npm run test:unit -w packages/crypto -w apps/api",
+    "test:integration": "npm run test:integration -w apps/api",
+    "test:e2e": "npm run test:e2e -w apps/web",
+    "clean": "rimraf apps/*/dist packages/*/dist apps/web/.next"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^18.4.0-beta.17",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}

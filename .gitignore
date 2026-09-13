@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+
+# Environment and secrets
+.env
+.env*.local
+*.pem
+*.key
+
+# Test coverage
+coverage/
+*.lcov
+
+# Caches and tooling
+.turbo/
+.cache/
+*.tsbuildinfo
+.eslintcache
+
+# Database and SQLite / Prisma
+prisma/*.db
+prisma/*.db-journal
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
