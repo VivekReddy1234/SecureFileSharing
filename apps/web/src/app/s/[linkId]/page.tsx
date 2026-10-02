@@ -49,13 +49,7 @@ export default function ShareLinkPage({ params }: { params: { linkId: string } }
       setManifest(decryptedManifest);
       setNeedsPassword(false);
 
-      // Also get S3 download URL if available
-      try {
-        const dlRes = await api.getDownloadUrl(res.fileId);
-        setDownloadUrl(dlRes.downloadUrl);
-      } catch {
-        // Direct download URL might require authentication or range requests
-      }
+      setDownloadUrl(res.downloadUrl);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to access share link';
       setError(msg);

@@ -24,7 +24,8 @@ import {
   UserProfile,
 } from '@ciphervault/shared';
 
-export const NEXT_PUBLIC_API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+export const NEXT_PUBLIC_API_URL =
+  (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000').replace(/\/+$/, '');
 
 let memoryAccessToken: string | null = null;
 
