@@ -55,6 +55,6 @@ export const generalLimiter = createLimiter('general', {
 export const shareLinkPasswordLimiter = createLimiter('sharelink', {
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyGenerator: (req) => `${req.ip}-${req.params['linkId'] ?? ''}`,
+  keyGenerator: (req) => `${req.ip}-${req.params['id'] ?? ''}`,
   message: { message: 'Too many password attempts for this link, please try again later' },
 });

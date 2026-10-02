@@ -144,6 +144,7 @@ cp .env.example .env
 | `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Access Key | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
 | `AWS_S3_BUCKET` | Dedicated private S3 bucket name | `ciphervault-secure-vault` |
 | `CORS_ORIGIN` | Allowed client origin | `http://localhost:3000` |
+| `NEXT_PUBLIC_API_URL` | Frontend API base URL | `http://localhost:4000` |
 | `MAX_FILE_SIZE_BYTES` | Maximum upload ceiling in bytes | `5368709120` (5 GiB) |
 | `ACCESS_TOKEN_TTL_MINUTES` | Access token lifetime | `15` |
 | `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime | `30` |
@@ -156,10 +157,40 @@ Configure the bucket CORS policy in the AWS Management Console to allow direct b
   {
     "AllowedHeaders": ["*"],
     "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
-    "AllowedOrigins": ["http://localhost:3000", "https://yourdomain.com"],
+    "AllowedOrigins": [
+      "http://localhost:3000",
+      "https://YOUR-CIPHERVAULT-FRONTEND.vercel.app"
+    ],
     "ExposeHeaders": ["ETag", "x-amz-server-side-encryption"]
   }
 ]
+```
+
+### Production Deployment Variables
+
+#### Frontend — Vercel
+
+```env
+NEXT_PUBLIC_API_URL=https://YOUR-CIPHERVAULT-BACKEND.onrender.com
+```
+
+#### Backend — Render
+
+```env
+DATABASE_URL=postgresql://<neon-user>:<neon-password>@<neon-host>/<database>?sslmode=require
+REDIS_URL=redis://<upstash-username>:<upstash-password>@<upstash-host>:<upstash-port>
+JWT_SECRET=<generate-a-random-secret-at-least-32-characters>
+JWT_REFRESH_SECRET=<generate-a-different-random-secret-at-least-32-characters>
+AWS_REGION=<your-aws-region>
+AWS_ACCESS_KEY_ID=<your-aws-access-key-id>
+AWS_SECRET_ACCESS_KEY=<your-aws-secret-access-key>
+AWS_S3_BUCKET=<your-private-s3-bucket-name>
+CORS_ORIGIN=https://YOUR-CIPHERVAULT-FRONTEND.vercel.app
+MAX_FILE_SIZE_BYTES=5368709120
+ACCESS_TOKEN_TTL_MINUTES=15
+REFRESH_TOKEN_TTL_DAYS=30
+NODE_ENV=production
+API_PORT=4000
 ```
 
 ---

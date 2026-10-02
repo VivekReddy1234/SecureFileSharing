@@ -22,6 +22,13 @@ import {
 
 export const authRouter = Router();
 
+const refreshCookieOptions = {
+  httpOnly: true,
+  secure: env.NODE_ENV === 'production',
+  sameSite: env.NODE_ENV === 'production' ? ('none' as const) : ('lax' as const),
+  path: '/',
+};
+
 /**
  * Helper to wrap async route handlers so rejected promises are forwarded to Express error handler.
  */
@@ -180,11 +187,8 @@ authRouter.post(
     });
 
     res.cookie('ciphervault_refresh', refreshToken, {
-      httpOnly: true,
-      secure: env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      ...refreshCookieOptions,
       maxAge: env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
-      path: '/',
     });
 
     await logEvent({
@@ -248,7 +252,7 @@ authRouter.post(
         metadata: { familyId: existingToken.familyId },
       });
 
-      res.clearCookie('ciphervault_refresh');
+      res.clearCookie('ciphervault_refresh', refreshCookieOptions);
       throw new UnauthorizedError('Token reuse detected — all sessions revoked');
     }
 
@@ -285,11 +289,8 @@ authRouter.post(
     });
 
     res.cookie('ciphervault_refresh', newRefreshToken, {
-      httpOnly: true,
-      secure: env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      ...refreshCookieOptions,
       maxAge: env.REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000,
-      path: '/',
     });
 
     await logEvent({
@@ -319,7 +320,7 @@ authRouter.post(
       });
     }
 
-    res.clearCookie('ciphervault_refresh', { path: '/' });
+    res.clearCookie('ciphervault_refresh', refreshCookieOptions);
 
     await logEvent({
       userId: req.user!.id,
@@ -383,7 +384,7 @@ authRouter.post(
       }),
     ]);
 
-    res.clearCookie('ciphervault_refresh', { path: '/' });
+    res.clearCookie('ciphervault_refresh', refreshCookieOptions);
 
     await logEvent({
       userId,

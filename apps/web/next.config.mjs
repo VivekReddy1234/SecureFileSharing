@@ -1,3 +1,22 @@
+const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+
+let apiOrigin = 'http://localhost:4000';
+let apiWebSocketOrigin = 'ws://localhost:4000';
+
+try {
+  const parsed = new URL(rawApiUrl);
+  apiOrigin = parsed.origin;
+  parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+  apiWebSocketOrigin = parsed.origin;
+} catch {
+  // Keep secure localhost fallbacks for malformed env values
+}
+
+const connectSrc = ["'self'", apiOrigin, apiWebSocketOrigin];
+if (process.env.NODE_ENV !== 'production') {
+  connectSrc.push('ws://localhost:3000');
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
@@ -39,7 +58,7 @@ const nextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob:",
               "font-src 'self' data:",
-              "connect-src 'self' http://localhost:4000 ws://localhost:3000",
+              `connect-src ${connectSrc.join(' ')}`,
               "object-src 'none'",
               "base-uri 'self'",
               "form-action 'self'",

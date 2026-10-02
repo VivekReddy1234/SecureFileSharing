@@ -3,7 +3,7 @@ import cookieParser from 'cookie-parser';
 import express, { ErrorRequestHandler, Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import { v4 as uuidv4 } from 'uuid';
-import { CSRF_HEADER_NAME } from '@ciphervault/shared';
+import { CSRF_HEADER_NAME, CSRF_HEADER_VALUE } from '@ciphervault/shared';
 
 // Controllers
 import { authRouter } from './controllers/auth.controller';
@@ -20,8 +20,19 @@ import { loginLimiter, registrationLimiter, refreshLimiter } from './middleware/
 
 // Error types
 import { AppError } from './types/errors';
+import { env } from './config/env';
 
 export const app = express();
+
+const normalizeOrigin = (value: string): string => {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value.trim().replace(/\/+$/, '');
+  }
+};
+
+const allowedOrigin = normalizeOrigin(env.CORS_ORIGIN);
 
 // ──── Security Headers (Helmet) ────
 app.use(
@@ -32,7 +43,7 @@ app.use(
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"], // Tailwind needs inline styles
         imgSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'", process.env.CORS_ORIGIN ?? 'http://localhost:3000'],
+        connectSrc: ["'self'", allowedOrigin],
         fontSrc: ["'self'"],
         objectSrc: ["'none'"],
         mediaSrc: ["'self'"],
@@ -56,12 +67,12 @@ app.use(
 );
 
 // ──── CORS ────
-const allowedOrigin = process.env.CORS_ORIGIN ?? 'http://localhost:3000';
 app.use(
   cors({
     origin: (origin, callback) => {
+      const normalizedOrigin = origin ? normalizeOrigin(origin) : '';
       // Allow requests with no origin (curl, server-to-server) or matching origin
-      if (!origin || origin === allowedOrigin) {
+      if (!origin || normalizedOrigin === allowedOrigin) {
         callback(null, true);
       } else {
         callback(new Error('CORS policy violation: origin not permitted'));
@@ -97,6 +108,20 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Small limit — actual file bytes go directly to S3, not through this API
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// ──── CSRF Header Guard ────
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+    return next();
+  }
+
+  const csrfHeader = req.header(CSRF_HEADER_NAME);
+  if (csrfHeader !== CSRF_HEADER_VALUE) {
+    return next(new AppError(403, 'Missing or invalid CSRF header', 'CSRF_MISSING_OR_INVALID'));
+  }
+
+  return next();
+});
 
 // ──── Rate Limiting ────
 app.use(generalLimiter);

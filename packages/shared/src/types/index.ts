@@ -273,6 +273,8 @@ export interface ShareLinkAccessResponse {
   manifestIvBase64: string;
   fileId: string;
   canDownload: boolean;
+  downloadUrl: string | null;
+  downloadUrlExpiresAt: string | null;
   requiresPassword: boolean;
 }
 

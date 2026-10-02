@@ -6,6 +6,7 @@ import { assertFileAccess, assertFileOwnership } from '../services/authorization
 import { logAuditEvent } from '../services/audit.service';
 import * as s3Service from '../services/s3.service';
 import { NotFoundError, ValidationError } from '../types/errors';
+import { env } from '../config/env';
 import {
   fileInitUploadSchema,
   fileIdParamSchema,
@@ -13,7 +14,7 @@ import {
 } from '@ciphervault/shared';
 
 export const fileRouter = Router();
-const MAX_FILE_SIZE_BYTES = BigInt(process.env.MAX_FILE_SIZE_BYTES || '5368709120'); // Default 5GB
+const MAX_FILE_SIZE_BYTES = BigInt(env.MAX_FILE_SIZE_BYTES);
 
 fileRouter.post(
   '/init-upload',
@@ -112,6 +113,9 @@ fileRouter.post(
       if (!objectExists.exists) {
         throw new ValidationError('S3 object not found or incomplete');
       }
+      if (BigInt(objectExists.contentLength) > MAX_FILE_SIZE_BYTES) {
+        throw new ValidationError('File size exceeds maximum limit');
+      }
 
       const updatedFile = await prisma.file.update({
         where: { id: fileId },
@@ -183,7 +187,7 @@ fileRouter.get(
           encryptedManifestBase64: Buffer.from(f.encryptedManifest).toString('base64'),
           manifestIvBase64: f.manifestIv,
           createdAt: f.createdAt.toISOString(),
-          wrappedKey: f.keyGrants[0]?.wrappedKey ?? '',
+          wrappedKeyBase64: f.keyGrants[0]?.wrappedKey ?? '',
           isOwner: f.ownerId === userId,
         })),
         nextCursor,

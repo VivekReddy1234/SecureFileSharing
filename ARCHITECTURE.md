@@ -622,7 +622,7 @@ Authentication uses short-lived access credentials combined with rotating long-l
    - Carries user ID, email, role, and active session identifiers.
    - Sent by the client in the `Authorization: Bearer <token>` header.
 2. **Refresh Token (Long-Lived: 7 Days)**:
-   - Opaque cryptographically random 256-bit token issued inside an `HttpOnly`, `Secure`, `SameSite=Strict` cookie.
+   - Opaque cryptographically random 256-bit token issued inside an `HttpOnly` cookie (`SameSite=None; Secure` in production cross-origin deployments, `SameSite=Lax` in local development).
    - Only the SHA-256 hash of the token is persisted in PostgreSQL.
    - **Token Family & Reuse Detection**: Every refresh token belongs to a token `family`. Upon issuance of a new access token, the old refresh token is marked as revoked and replaced with a new token in the same family. If an already-revoked refresh token is ever submitted, the entire token family is immediately invalidated in Redis and PostgreSQL, locking out potential adversaries who intercepted an expired token.
 

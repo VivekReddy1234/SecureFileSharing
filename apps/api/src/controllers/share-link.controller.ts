@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.middleware';
 import { validateBody, validateParams } from '../middleware/validation.middleware';
 import { assertFileOwnership } from '../services/authorization.service';
 import { logAuditEvent } from '../services/audit.service';
+import * as s3Service from '../services/s3.service';
 import {
   shareLinkCreateSchema,
   fileIdParamSchema,
@@ -11,6 +12,7 @@ import {
 } from '@ciphervault/shared';
 import { ForbiddenError, NotFoundError, UnauthorizedError } from '../types/errors';
 import * as argon2 from 'argon2';
+import { shareLinkPasswordLimiter } from '../middleware/rate-limit.middleware';
 
 export const shareLinkRouter = Router();
 
@@ -66,6 +68,7 @@ shareLinkRouter.post(
 // Mounts at /share-links/:id
 shareLinkRouter.get(
   '/:id',
+  shareLinkPasswordLimiter,
   validateParams(shareIdParamSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -116,12 +119,22 @@ shareLinkRouter.get(
         metadata: { fileId: link.fileId },
       });
 
+      let downloadUrl: string | null = null;
+      let downloadUrlExpiresAt: string | null = null;
+      if (link.canDownload) {
+        const presigned = await s3Service.generateDownloadUrl(link.file.s3Key);
+        downloadUrl = presigned.url;
+        downloadUrlExpiresAt = presigned.expiresAt;
+      }
+
       return res.json({
         wrappedKeyBase64: link.wrappedKey,
         encryptedManifestBase64: Buffer.from(link.file.encryptedManifest).toString('base64'),
         manifestIvBase64: link.file.manifestIv,
         fileId: link.fileId,
         canDownload: link.canDownload,
+        downloadUrl,
+        downloadUrlExpiresAt,
         requiresPassword: !!link.passwordHash,
       });
     } catch (error) {
