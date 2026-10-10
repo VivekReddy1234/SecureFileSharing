@@ -1,17 +1,9 @@
-<<<<<<< Updated upstream
 # CipherVault — End-to-End Encrypted File Sharing
 
 CipherVault is a secure file-sharing platform designed around client-side encryption. Files are encrypted in the browser before upload, while the API manages authentication, permissions, encrypted metadata, key grants, share links, and audit events. Encrypted file chunks are transferred directly between the browser and a private S3 bucket using short-lived presigned URLs.
-=======
-# Secure File Sharing Platform (E2EE)
-
-> **A production-quality, interview/portfolio-grade, genuine end-to-end encrypted (E2EE) cloud file sharing platform.**
-> Plaintext files and raw encryption keys exist ONLY in the browser memory of an authorized user, transiently. The server, database, and S3 hold ONLY ciphertext, wrapped key material, and access-control/audit metadata.
->>>>>>> Stashed changes
 
 > **Security note:** This is a portfolio project and a security-sensitive application. The architecture is designed around a zero-knowledge model, but that label is not a substitute for independent cryptographic review, production security testing, recovery testing, and careful deployment. Do not use it for irreplaceable or highly sensitive files without those checks.
 
-<<<<<<< Updated upstream
 ## Contents
 
 - [Features](#features)
@@ -28,16 +20,6 @@ CipherVault is a secure file-sharing platform designed around client-side encryp
 - [License](#license)
 
 ## Features
-=======
-## 1. Non-Negotiable Architectural Rules
-
-1. **Zero Plaintext Files on Backend**: The Express backend must NEVER receive, log, or store plaintext file contents. Only ciphertext reaches the server / S3.
-2. **True Cryptography Only**: No base64-as-encryption, no "hash and call it encrypted", no server-side AES after receiving plaintext.
-3. **In-Memory JWT Access Tokens**: Access tokens are kept in client memory only (never `localStorage` or `sessionStorage`); session persistence uses a secure, `httpOnly`, rotating refresh-token cookie.
-4. **IDOR Prevention by Construction**: Every protected endpoint verifies authentication AND authorization independently (ownership or explicit FileShare/FileKey grant). Queries are always filtered by the authenticated user's ID.
-5. **Zero-Knowledge Admin Model**: The `ADMIN` role has NO special ability to decrypt files, unwrap keys, or bypass the envelope encryption model. Admin capabilities are strictly operational (account suspension, user management, audit visibility, force-revoking abusive links).
-6. **No Committed Secrets**: Environment variables are used for all configuration via a strict `.env.example`.
->>>>>>> Stashed changes
 
 - **Client-side file encryption:** Uses the browser Web Crypto API and AES-256-GCM helpers in `packages/crypto`.
 - **Chunked uploads:** File data is encrypted in the browser and uploaded directly to a private S3 bucket with multipart uploads and short-lived presigned URLs. The API coordinates upload state and does not proxy the bulk file bytes.
@@ -51,7 +33,6 @@ CipherVault is a secure file-sharing platform designed around client-side encryp
 - **Audit trail:** Records security-sensitive events while avoiding logging plaintext file contents and cryptographic secrets.
 - **PostgreSQL + Prisma:** Persist user identities, encrypted manifests, wrapped-key grants, permissions, share links, token state, and audit records.
 
-<<<<<<< Updated upstream
 ## Architecture
 
 ```mermaid
@@ -89,60 +70,6 @@ graph TD
 ```
 
 ### Typical upload flow
-=======
-## 2. Tech Stack
-
-- **Frontend**: Next.js 14 (App Router), React 18, TypeScript (strict), Tailwind CSS
-- **Backend**: Node.js, Express.js, TypeScript (strict)
-- **Database**: PostgreSQL via Prisma ORM
-- **Cache / Security State**: Redis (rate-limiting, JWT denylist, atomic link download enforcement)
-- **Object Storage**: AWS S3 (private bucket, presigned multipart URLs only)
-- **Transactional Email**: AWS SES (email verification and password resets)
-- **Client-Side Crypto**: Browser Web Crypto API (`SubtleCrypto`):
-  - **File Content**: AES-256-GCM (8 MiB chunks, unique IV per chunk: 8-byte file salt || 4-byte chunk index)
-  - **Key Wrapping**: RSA-OAEP-2048 / SHA-256 for known recipients
-  - **Password-Derived Keys**: PBKDF2-HMAC-SHA256 ($\ge 600,000$ iterations)
-- **Server-Side Password Hashing**: Argon2id
-- **Validation**: Zod on every request body, query, and path parameter
-- **Security Middleware**: Helmet with strict CSP, CORS allow-list, Redis-backed rate limiting
-- **Testing**: Jest / Vitest + Supertest (backend), React Testing Library (frontend)
-
----
-
-## 3. Backend Architecture
-
-The backend codebase (`apps/api/src/`) adheres strictly to layered separation of concerns:
-
-```
-src/
-  routes/         (thin route definitions only, delegate to controllers)
-  controllers/    (parse req, call services, shape responses)
-  services/       (business logic: authService, fileService, shareService, shareLinkService,
-                    s3Service, auditService, emailService)
-  repositories/   (Prisma queries, one per model or domain, scoped to user ID)
-  middleware/      (authenticate, requireRole, rateLimit, errorHandler, validate(zodSchema))
-  validators/       (Zod schemas per endpoint)
-  utils/              (server-side crypto-adjacent helpers — hashing, token generation via CSPRNG)
-  config/               (env loading/validation, redis client, s3 client, ses client, prisma client)
-```
-
----
-
-## 4. Phased Execution Roadmap
-
-- [x] **PHASE 1 — Architecture + project initialization**: Monorepo scaffolding, strict TypeScript in all packages, backend layered folder structure, Prisma initialized, linting/formatting configured, base README skeleton.
-- [ ] **PHASE 2 — Database + Prisma**: Implement complete 10-model schema, relations, indexes, migrations, and seed scripts.
-- [ ] **PHASE 3 — Authentication + authorization**: Registration with client keypair generation + wrapped private key storage, email verification via SES, login/logout, Argon2id, JWT issuance, rotating refresh tokens with reuse detection, password reset with recovery key, Redis rate limiting, RBAC middleware.
-- [ ] **PHASE 4 — AWS S3 + presigned URLs**: S3 client setup, bucket config, multipart-upload initiate/complete endpoints, presigned PUT/GET generation, IAM least-privilege policy.
-- [ ] **PHASE 5 — Client-side encryption**: `lib/crypto` module: keypair generation, private key wrap/unwrap, FEK generation, chunked AES-GCM with deterministic per-chunk IV, RSA-OAEP wrap/unwrap, PBKDF2 link wrapping, and unit tests.
-- [ ] **PHASE 6 — File management**: Upload UI with chunked progress/cancel/retry, file listing with server-side pagination (date/size) and client-side name search/sort over decrypted metadata, rename, soft delete.
-- [ ] **PHASE 7 — File sharing + permissions**: Recipient lookup, key re-wrapping, share/revoke/permission-change endpoints, and "Shared with me" view.
-- [ ] **PHASE 8 — Secure public share links**: Open vs password-protected link creation, URL fragment key handling, `/share/[token]` consumption, unlock flow, atomic expiry and max-downloads enforcement.
-- [ ] **PHASE 9 — Audit logging + Redis**: AuditLog writes on all security actions, user self-audit and admin audit endpoints, Redis denylist and atomic download counters.
-- [ ] **PHASE 10 — Frontend dashboard + remaining UI**: Dashboard, profile/settings, admin dashboard, error/404 pages, accessibility and encryption status polish.
-- [ ] **PHASE 11 — Testing + security hardening**: Full backend & frontend test suites (IDOR, role escalation, token tampering, wrong password, rate limits).
-- [ ] **PHASE 12 — Deployment + documentation**: Finalized `.env.example`, deployment guides (Vercel, Render/Railway, AWS), and comprehensive documentation.
->>>>>>> Stashed changes
 
 1. The browser prepares the file manifest and encryption keys on the client.
 2. The client encrypts file data before transmitting it.
@@ -151,7 +78,6 @@ src/
 5. The browser asks the API to complete the multipart upload. The API checks ownership, completes the S3 upload, verifies that the object exists and is within the configured size limit, and updates the database record.
 6. The API persists only encrypted manifest/key material and operational metadata; file content remains in S3 as ciphertext.
 
-<<<<<<< Updated upstream
 ### Typical download flow
 
 1. The client requests a download URL for a file.
@@ -220,15 +146,11 @@ npm ci
 ### 2. Configure the environment
 
 Copy `.env.example` to `.env` at the repository root, then replace placeholders with development values. Use different random values for `JWT_SECRET` and `JWT_REFRESH_SECRET`; do not use the example placeholders outside local throwaway testing.
-=======
-## 5. Development Setup
->>>>>>> Stashed changes
 
 ```bash
 # 1. Install dependencies
 npm install
 
-<<<<<<< Updated upstream
 The Compose file reads the root `.env` for variable interpolation and passes the configured values into its containers. The API validates its required variables at startup. For direct `npm run dev:api` execution outside Compose, make sure the variables are actually exported into the shell/process environment; the API does not load the root `.env` file by itself.
 
 **S3 requirement:** The checked-in Compose file starts PostgreSQL, Redis, the API, and the Next.js web app. It does not start a local S3 emulator. The example/mock AWS credentials can let containers start, but they will not make upload/download operations work. Configure a private S3 bucket and valid, least-privilege credentials for functional file transfers.
@@ -397,14 +319,3 @@ These commands remove the directory from future repository snapshots while leavi
 ## License
 
 A root `LICENSE` file was not found when this README was prepared. Add the intended license file and update this section once the licensing choice is confirmed.
-=======
-# 2. Typecheck monorepo
-npm run typecheck
-
-# 3. Run linting
-npm run lint
-
-# 4. Run tests
-npm run test
-```
->>>>>>> Stashed changes
