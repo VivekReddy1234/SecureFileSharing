@@ -106,6 +106,10 @@ fileRouter.post(
       const file = await prisma.file.findUnique({ where: { id: fileId } });
       if (!file) throw new NotFoundError('File not found');
 
+      if (file.status !== 'PENDING' || file.s3UploadId !== uploadId) {
+        throw new ValidationError('Upload session is invalid or already completed');
+      }
+
       // Complete multipart upload in S3
       await s3Service.completeMultipartUpload(file.s3Key, uploadId, parts);
 

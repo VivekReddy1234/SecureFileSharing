@@ -1,0 +1,117 @@
+diff --git a/apps/api/src/controllers/file.controller.ts b/apps/api/src/controllers/file.controller.ts
+index 4c14628..a393d28 100644
+--- a/apps/api/src/controllers/file.controller.ts
++++ b/apps/api/src/controllers/file.controller.ts
+@@ -106,6 +106,10 @@ fileRouter.post(
+       const file = await prisma.file.findUnique({ where: { id: fileId } });
+       if (!file) throw new NotFoundError('File not found');
+ 
++      if (file.status !== 'PENDING' || file.s3UploadId !== uploadId) {
++        throw new ValidationError('Upload session is invalid or already completed');
++      }
++
+       // Complete multipart upload in S3
+       await s3Service.completeMultipartUpload(file.s3Key, uploadId, parts);
+ 
+diff --git a/apps/api/src/controllers/share-link.controller.ts b/apps/api/src/controllers/share-link.controller.ts
+index b1264e1..39c6e61 100644
+--- a/apps/api/src/controllers/share-link.controller.ts
++++ b/apps/api/src/controllers/share-link.controller.ts
+@@ -104,10 +104,18 @@ shareLinkRouter.get(
+         }
+       }
+ 
+-      await prisma.shareLink.update({
+-        where: { id: linkId },
++      const usage = await prisma.shareLink.updateMany({
++        where: {
++          id: linkId,
++          revokedAt: null,
++          expiresAt: link.expiresAt ? { gt: new Date() } : null,
++          ...(link.maxUses !== null ? { useCount: { lt: link.maxUses } } : {}),
++        },
+         data: { useCount: { increment: 1 } },
+       });
++      if (usage.count !== 1) {
++        throw new NotFoundError('Link not found, expired, or maximum usage reached');
++      }
+ 
+       await logAuditEvent({
+         userId: null, // Anonymous access
+diff --git a/apps/api/src/middleware/auth.middleware.ts b/apps/api/src/middleware/auth.middleware.ts
+index 3c12569..77ac726 100644
+--- a/apps/api/src/middleware/auth.middleware.ts
++++ b/apps/api/src/middleware/auth.middleware.ts
+@@ -1,8 +1,7 @@
+ import { Request, Response, NextFunction } from 'express';
+-import { jwtVerify } from 'jose';
+-import { env } from '../config/env';
+ import { UnauthorizedError, ForbiddenError } from '../types/errors';
+ import { UserRole } from '@ciphervault/shared';
++import { verifyAccessToken } from '../services/auth.service';
+ 
+ export const requireAuth = async (req: Request, _res: Response, next: NextFunction) => {
+   try {
+@@ -16,23 +15,11 @@ export const requireAuth = async (req: Request, _res: Response, next: NextFuncti
+       throw new UnauthorizedError('Missing token');
+     }
+ 
+-    const secret = new TextEncoder().encode(env.JWT_SECRET);
+-    
+-    const { payload, protectedHeader } = await jwtVerify(token, secret, {
+-      algorithms: ['HS256'],
+-    });
+-
+-    if (protectedHeader.alg === 'none') {
+-      throw new UnauthorizedError('Invalid token algorithm');
+-    }
+-
+-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+-      throw new UnauthorizedError('Token expired');
+-    }
++    const payload = await verifyAccessToken(token);
+ 
+     req.user = {
+-      id: payload.id as string,
+-      email: payload.email as string,
++      id: payload.id,
++      email: payload.email,
+       role: payload.role as UserRole,
+     };
+ 
+diff --git a/apps/api/src/services/auth.service.ts b/apps/api/src/services/auth.service.ts
+index 6139790..e186469 100644
+--- a/apps/api/src/services/auth.service.ts
++++ b/apps/api/src/services/auth.service.ts
+@@ -33,11 +33,27 @@ export const generateRefreshToken = (): string => {
+ 
+ export const verifyAccessToken = async (token: string): Promise<{ id: string; email: string; role: string }> => {
+   const secret = new TextEncoder().encode(env.JWT_SECRET);
+-  const { payload } = await jwtVerify(token, secret, { algorithms: ['HS256'] });
++  const { payload } = await jwtVerify(token, secret, {
++    algorithms: ['HS256'],
++    requiredClaims: ['exp', 'iat'],
++  });
++
++  if (
++    typeof payload.exp !== 'number' ||
++    typeof payload.iat !== 'number' ||
++    typeof payload.id !== 'string' ||
++    payload.id.length === 0 ||
++    typeof payload.email !== 'string' ||
++    payload.email.length === 0 ||
++    (payload.role !== 'USER' && payload.role !== 'ADMIN')
++  ) {
++    throw new Error('Invalid access token claims');
++  }
++
+   return {
+-    id: payload.id as string,
+-    email: payload.email as string,
+-    role: payload.role as string,
++    id: payload.id,
++    email: payload.email,
++    role: payload.role,
+   };
+ };
+ 

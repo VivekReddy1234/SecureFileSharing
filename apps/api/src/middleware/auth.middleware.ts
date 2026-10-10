@@ -1,8 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { jwtVerify } from 'jose';
-import { env } from '../config/env';
 import { UnauthorizedError, ForbiddenError } from '../types/errors';
 import { UserRole } from '@ciphervault/shared';
+import { verifyAccessToken } from '../services/auth.service';
 
 export const requireAuth = async (req: Request, _res: Response, next: NextFunction) => {
   try {
@@ -16,23 +15,11 @@ export const requireAuth = async (req: Request, _res: Response, next: NextFuncti
       throw new UnauthorizedError('Missing token');
     }
 
-    const secret = new TextEncoder().encode(env.JWT_SECRET);
-    
-    const { payload, protectedHeader } = await jwtVerify(token, secret, {
-      algorithms: ['HS256'],
-    });
-
-    if (protectedHeader.alg === 'none') {
-      throw new UnauthorizedError('Invalid token algorithm');
-    }
-
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      throw new UnauthorizedError('Token expired');
-    }
+    const payload = await verifyAccessToken(token);
 
     req.user = {
-      id: payload.id as string,
-      email: payload.email as string,
+      id: payload.id,
+      email: payload.email,
       role: payload.role as UserRole,
     };
 

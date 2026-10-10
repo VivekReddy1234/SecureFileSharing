@@ -104,10 +104,18 @@ shareLinkRouter.get(
         }
       }
 
-      await prisma.shareLink.update({
-        where: { id: linkId },
+      const usage = await prisma.shareLink.updateMany({
+        where: {
+          id: linkId,
+          revokedAt: null,
+          expiresAt: link.expiresAt ? { gt: new Date() } : null,
+          ...(link.maxUses !== null ? { useCount: { lt: link.maxUses } } : {}),
+        },
         data: { useCount: { increment: 1 } },
       });
+      if (usage.count !== 1) {
+        throw new NotFoundError('Link not found, expired, or maximum usage reached');
+      }
 
       await logAuditEvent({
         userId: null, // Anonymous access

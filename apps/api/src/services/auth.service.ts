@@ -33,11 +33,27 @@ export const generateRefreshToken = (): string => {
 
 export const verifyAccessToken = async (token: string): Promise<{ id: string; email: string; role: string }> => {
   const secret = new TextEncoder().encode(env.JWT_SECRET);
-  const { payload } = await jwtVerify(token, secret, { algorithms: ['HS256'] });
+  const { payload } = await jwtVerify(token, secret, {
+    algorithms: ['HS256'],
+    requiredClaims: ['exp', 'iat'],
+  });
+
+  if (
+    typeof payload.exp !== 'number' ||
+    typeof payload.iat !== 'number' ||
+    typeof payload.id !== 'string' ||
+    payload.id.length === 0 ||
+    typeof payload.email !== 'string' ||
+    payload.email.length === 0 ||
+    (payload.role !== 'USER' && payload.role !== 'ADMIN')
+  ) {
+    throw new Error('Invalid access token claims');
+  }
+
   return {
-    id: payload.id as string,
-    email: payload.email as string,
-    role: payload.role as string,
+    id: payload.id,
+    email: payload.email,
+    role: payload.role,
   };
 };
 
