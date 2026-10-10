@@ -1,0 +1,94 @@
+diff --git a/apps/api/src/services/authorization.service.ts b/apps/api/src/services/authorization.service.ts
+--- a/apps/api/src/services/authorization.service.ts
++++ b/apps/api/src/services/authorization.service.ts
+@@ -13,6 +13,12 @@ export async function assertFileAccess(
+   if (!file) {
+     throw new NotFoundError('File not found');
+   }
++
++  // Only completed uploads should be viewable or downloadable. This also
++  // prevents access to files that have been marked deleted or failed.
++  if (file.status !== 'COMPLETE') {
++    throw new NotFoundError('File not found or unavailable');
++  }
+ 
+   if (file.ownerId === userId) {
+@@ -57,6 +63,17 @@ export async function assertFileAccess(
+     throw new ForbiddenError('Access denied');
+   }
+ 
++  if (!share.canView) {
++    await logAuditEvent({
++      userId,
++      eventType: 'UNAUTHORIZED_ACCESS_ATTEMPT',
++      resourceId: fileId,
++      success: false,
++      metadata: { reason: 'View permission required' },
++    });
++    throw new ForbiddenError('View access denied');
++  }
++
+   if (requiredPermission === 'download' && !share.canDownload) {
+     await logAuditEvent({
+       userId,
+diff --git a/apps/api/src/controllers/share-link.controller.ts b/apps/api/src/controllers/share-link.controller.ts
+--- a/apps/api/src/controllers/share-link.controller.ts
++++ b/apps/api/src/controllers/share-link.controller.ts
+@@ -53,7 +53,12 @@ shareLinkRouter.get(
+         include: { file: true },
+       });
+ 
+-      if (!link || link.revokedAt || (link.expiresAt && link.expiresAt < new Date())) {
++      if (
++        !link ||
++        link.revokedAt ||
++        (link.expiresAt && link.expiresAt < new Date()) ||
++        link.file.status !== 'COMPLETE'
++      ) {
+         throw new NotFoundError('Link not found or expired');
+       }
+diff --git a/apps/web/src/components/ShareDialog.tsx b/apps/web/src/components/ShareDialog.tsx
+--- a/apps/web/src/components/ShareDialog.tsx
++++ b/apps/web/src/components/ShareDialog.tsx
+@@ -22,7 +22,6 @@ export default function ShareDialog({
+   const [tab, setTab] = useState<'direct' | 'link'>('direct');
+   const [email, setEmail] = useState('');
+-  const [password, setPassword] = useState('');
+   const [generatedLink, setGeneratedLink] = useState('');
+   const [loading, setLoading] = useState(false);
+   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+@@ -70,9 +69,10 @@ export default function ShareDialog({
+       setLoading(true);
+       if (!privateKey) throw new Error('Private key is not loaded in memory. Please re-login.');
+ 
+-      const { linkSecretBase64Url, wrappingKey } = await createShareLinkKeys(
+-        password ? password : undefined
+-      );
++      // Password protection is not wired to the API's Argon2 password-hash
++      // field yet. For the college demo, create a working secret-fragment link
++      // without presenting a password option that would fail for recipients.
++      const { linkSecretBase64Url, wrappingKey } = await createShareLinkKeys();
+ 
+       const dek = await unwrapDek(wrappedDek, privateKey);
+       const symWrappedDek = await wrapDekForShareLink(dek, wrappingKey);
+@@ -131,19 +131,10 @@ export default function ShareDialog({
+         ) : (
+           <div className="space-y-4">
+-            <div>
+-              <label className="block text-sm font-medium text-gray-700 mb-1">
+-                Optional Password Protection
+-              </label>
+-              <input
+-                type="password"
+-                placeholder="Leave blank for no password"
+-                className="block w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+-                value={password}
+-                onChange={(e) => setPassword(e.target.value)}
+-              />
+-            </div>
++            <p className="text-sm text-gray-600">
++              Anyone with this link can access the encrypted file. The decryption secret stays in the URL fragment.
++            </p>
+ 
+             {!generatedLink ? (
+               <button
