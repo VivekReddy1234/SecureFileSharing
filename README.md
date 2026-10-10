@@ -1,276 +1,321 @@
-# CipherVault — End-to-End Encrypted Cloud File Sharing Platform
+# CipherVault — End-to-End Encrypted File Sharing
 
-> **A production-grade, zero-knowledge cloud file storage and sharing platform where the server never possesses plaintext file contents or the keys needed to decrypt them.**
+CipherVault is a secure file-sharing platform designed around client-side encryption. Files are encrypted in the browser before upload, while the API manages authentication, permissions, encrypted metadata, key grants, share links, and audit events. Encrypted file chunks are transferred directly between the browser and a private S3 bucket using short-lived presigned URLs.
 
----
+> **Security note:** This is a portfolio project and a security-sensitive application. The architecture is designed around a zero-knowledge model, but that label is not a substitute for independent cryptographic review, production security testing, recovery testing, and careful deployment. Do not use it for irreplaceable or highly sensitive files without those checks.
 
-## 1. Project Overview
+## Contents
 
-CipherVault is built under a strict zero-knowledge trust boundary:
+- [Features](#features)
+- [Architecture](#architecture)
+- [Technology stack](#technology-stack)
+- [Security model and trade-offs](#security-model-and-trade-offs)
+- [Prerequisites](#prerequisites)
+- [Local development with Docker](#local-development-with-docker)
+- [Environment variables](#environment-variables)
+- [Run checks](#run-checks)
+- [Deployment overview](#deployment-overview)
+- [Repository hygiene before deployment](#repository-hygiene-before-deployment)
+- [Known limitations and hardening checklist](#known-limitations-and-hardening-checklist)
+- [License](#license)
 
-1. **Client-Side Cryptography**: Files are encrypted in chunks in the browser using AES-256-GCM before any byte leaves the client.
-2. **Direct-to-S3 Multipart Streaming**: Encrypted chunks stream directly to private AWS S3 buckets using short-lived presigned URLs. Raw file content never traverses the application backend.
-3. **Multi-Recipient Key Encapsulation**: File Data Encryption Keys (DEKs) are wrapped independently for each grantee using 3072-bit RSA-OAEP public keys.
-4. **Zero-Knowledge Share Links**: Ephemeral public share links embed high-entropy 256-bit secrets exclusively within the URL fragment (`#linkSecret`), ensuring they are never sent over HTTP to the server.
-5. **Comprehensive Audit Logging**: Tamper-evident logging of security events with absolute redaction of cryptographic secrets.
-6. **Zero Plaintext Admin Model**: Administrators can manage accounts and view system logs but possess no cryptographic ability to decrypt user data.
+## Features
 
----
+- **Client-side file encryption:** Uses the browser Web Crypto API and AES-256-GCM helpers in `packages/crypto`.
+- **Chunked uploads:** File data is encrypted in the browser and uploaded directly to a private S3 bucket with multipart uploads and short-lived presigned URLs. The API coordinates upload state and does not proxy the bulk file bytes.
+- **Per-recipient key grants:** Each authorized recipient receives a copy of the file Data Encryption Key (DEK) wrapped with their RSA-OAEP public key.
+- **Password-derived account keys:** PBKDF2-HMAC-SHA256 derives a master key in the browser; HKDF-SHA256 derives context-specific keys. The server receives an authentication key rather than the raw account password and hashes that authentication key with Argon2id.
+- **Authentication sessions:** Short-lived JWT access tokens and rotating opaque refresh tokens. The database stores refresh-token hashes and rotation-family metadata.
+- **Granular sharing permissions:** Internal shares support view, download, and reshare permissions, with optional expiration and revocation.
+- **Share links:** Share-link secrets are designed to stay in the URL fragment, which is not sent in the HTTP request. Optional link passwords provide an additional access gate.
+- **Recovery key flow:** The user's private key can be wrapped separately for account recovery.
+- **Security controls:** Request validation with Zod, rate-limiting middleware, security headers via Helmet, CSRF header checks, authorization checks, and audit events.
+- **Audit trail:** Records security-sensitive events while avoiding logging plaintext file contents and cryptographic secrets.
+- **PostgreSQL + Prisma:** Persist user identities, encrypted manifests, wrapped-key grants, permissions, share links, token state, and audit records.
 
-## 2. Architecture & Data Flow
+## Architecture
 
 ```mermaid
 graph TD
-    subgraph Browser Client [Authenticated Browser Client]
-        UI[Next.js 14 Web App]
-        WebCrypto[W3C Web Crypto API]
-        MemoryKeys[In-Memory Key Ring: MasterKey & PrivateKey]
-        WebCrypto --> MemoryKeys
-    end
+  subgraph Browser["Browser / client trust boundary"]
+    UI["Next.js 14 + React UI"]
+    Crypto["Web Crypto API / crypto package"]
+    Worker["Client-side chunking and encryption"]
+    UI --> Worker --> Crypto
+  end
 
-    subgraph API Server [Node.js Express API]
-        AuthCtrl[Auth Controller & Argon2id]
-        FileCtrl[File & Share Controller]
-        AuthzLayer[Mandatory assertFileAccess Middleware]
-        AuditSvc[Audit Logging Service]
-    end
+  subgraph App["Application API"]
+    API["Node.js + Express + TypeScript"]
+    Auth["Authentication and session controls"]
+    Authz["Authorization and input validation"]
+    S3Sign["Short-lived S3 presigned URL generation"]
+    Audit["Security audit service"]
+    API --> Auth
+    API --> Authz
+    API --> S3Sign
+    API --> Audit
+  end
 
-    subgraph Storage & Persistence [Storage Layer]
-        PG[(PostgreSQL 16 via Prisma)]
-        Redis[(Redis 7 - Token Family & Rate Limits)]
-        S3[(AWS S3 Private Bucket)]
-    end
+  PG[("PostgreSQL 16 / Prisma")]
+  Redis[("Redis 7")]
+  S3[("Private S3 bucket: ciphertext objects")]
 
-    Browser Client -- "1. TLS Auth (HKDF AuthKey)" --> AuthCtrl
-    Browser Client -- "2. Presigned URL Request" --> FileCtrl
-    FileCtrl --> AuthzLayer
-    AuthzLayer --> PG
-    FileCtrl -- "3. Presigned PUT/GET URLs" --> Browser Client
-    Browser Client -- "4. Direct Encrypted Chunks (AES-256-GCM)" --> S3
-    AuthCtrl --> Redis
-    FileCtrl --> AuditSvc
-    AuditSvc --> PG
+  UI <-->|"HTTPS / JSON"| API
+  Crypto -->|"Encrypted chunks using presigned URLs"| S3
+  Auth --> PG
+  Auth --> Redis
+  Authz --> PG
+  Audit --> PG
+  S3Sign --> PG
 ```
 
-### Key Workspaces in Monorepo
-- `apps/web`: Next.js 14 App Router, React 18, Tailwind CSS frontend with Web Crypto orchestration.
-- `apps/api`: Express + TypeScript backend with Prisma ORM, Argon2id hashing, Redis rate-limiting, and AWS SDK S3 presigner.
-- `packages/shared`: Shared TypeScript types, Zod schemas, and architectural constants.
-- `packages/crypto`: Thin, strictly-tested wrappers around the native Web Crypto API (`crypto.subtle`).
-- `docker/`: Multi-stage Dockerfiles and healthcheck-validated Docker Compose orchestration.
+### Typical upload flow
 
----
+1. The browser prepares the file manifest and encryption keys on the client.
+2. The client encrypts file data before transmitting it.
+3. The authenticated client requests an upload session and short-lived presigned part URLs from the API.
+4. The browser uploads encrypted parts directly to the private S3 bucket.
+5. The browser asks the API to complete the multipart upload. The API checks ownership, completes the S3 upload, verifies that the object exists and is within the configured size limit, and updates the database record.
+6. The API persists only encrypted manifest/key material and operational metadata; file content remains in S3 as ciphertext.
 
-## 3. Cryptographic Hierarchy & Invariants
+### Typical download flow
 
-```mermaid
-flowchart TD
-    Passphrase[User Password] -->|PBKDF2-HMAC-SHA256 >= 600,000 rounds| MasterKey[Master Key: 256 bits]
-    MasterKey -->|HKDF: ciphervault-auth-v1| AuthKey[Authentication Key]
-    AuthKey -->|TLS POST /auth/login| ServerArgon2[Server Argon2id Hash: User.authHash]
-    MasterKey -->|HKDF: ciphervault-privkey-wrap-v1| PrivWrapKey[Private Key Wrapping Key: AES-GCM]
-    RecoverySecret[256-bit CSPRNG Secret] -->|HKDF: ciphervault-recovery-wrap-v1| RecWrapKey[Recovery Wrapping Key: AES-GCM]
+1. The client requests a download URL for a file.
+2. The API checks the caller's permission and returns a short-lived presigned URL.
+3. The browser downloads ciphertext directly from S3.
+4. The browser unwraps the DEK using the recipient's private key and decrypts the file locally.
 
-    RSAIdentity[RSA-OAEP 3072-bit Keypair]
-    RSAIdentity -->|Public Key| ServerPub[User.publicKey - Plaintext]
-    RSAIdentity -->|Private Key + PrivWrapKey| WrappedPriv[User.wrappedPrivateKey - AES-GCM]
-    RSAIdentity -->|Private Key + RecWrapKey| RecWrappedPriv[User.recoveryWrappedPrivateKey]
+## Technology stack
 
-    FileDEK[File Data Encryption Key: Fresh AES-256 per file]
-    FileDEK -->|AES-256-GCM + IV per chunk + AAD: fileId||chunkIndex| EncryptedChunks[S3 Multipart Ciphertext]
-    FileDEK -->|RSA-OAEP Wrap with Grantee PublicKey| FileKeyGrant[FileKeyGrant.wrappedKey]
-    FileDEK -->|AES-GCM Wrap with Fragment Secret| ShareLink[ShareLink.wrappedKey]
+| Technology | Role |
+|---|---|
+| Next.js 14, React 18, TypeScript | Web application and UI |
+| Tailwind CSS | Styling |
+| W3C Web Crypto API | Browser-side cryptographic primitives |
+| AES-256-GCM | Authenticated encryption for file data and wrapped key material |
+| PBKDF2-HMAC-SHA256 + HKDF-SHA256 | Password-based master-key derivation and context-specific key derivation |
+| RSA-OAEP 3072-bit + SHA-256 | Wrap a file DEK separately for each recipient |
+| Node.js + Express + TypeScript | HTTP API and server-side business logic |
+| PostgreSQL 16 + Prisma | Persistent relational data |
+| Redis 7 + ioredis | Rate-limiting and abuse-control support used by the API |
+| AWS SDK for S3 | Multipart uploads, object checks, deletes, and presigned upload/download URLs |
+| Zod | Runtime request/schema validation |
+| Argon2id | Server-side hashing of the derived authentication key and optional share-link passwords |
+| Helmet | HTTP security headers |
+| Docker Compose | Local PostgreSQL, Redis, API, and web orchestration |
+
+## Security model and trade-offs
+
+### What the design is intended to protect
+
+- File bytes are encrypted before upload, so the application server and object store are intended to handle ciphertext rather than plaintext files.
+- The file DEK is wrapped for each authorized recipient; sharing does not require the server to know an unwrapped DEK.
+- The original filename and MIME type are included in an encrypted manifest rather than stored as ordinary plaintext metadata.
+- Presigned S3 URLs are short-lived capabilities and should be issued only after authorization checks.
+- Refresh tokens are random opaque values; only their hashes are stored in the database, with token-family metadata used for rotation/reuse handling.
+- Audit logs should never include passwords, raw tokens, master keys, unwrapped private keys, unwrapped DEKs, or plaintext file contents.
+
+### Important trade-offs and boundaries
+
+- **Metadata is still visible:** The service must retain some operational metadata, such as account IDs, relationships, object keys, timestamps, approximate ciphertext sizes, IP addresses, and sharing activity. Do not claim that all metadata is hidden.
+- **Revocation has limits:** Revoking a share prevents future authorized retrieval, but cannot erase a plaintext copy that a recipient already downloaded.
+- **Malware scanning:** The server cannot inspect encrypted file plaintext without changing the trust model. Client-side safety checks and user education are not equivalent to server-side malware scanning.
+- **Web-delivered code:** A compromised frontend deployment could serve malicious JavaScript. HTTPS, CSP, protected deployment credentials, code review, dependency hygiene, and reproducible releases reduce risk but do not eliminate this trust boundary.
+- **Recovery:** Users must safely store the recovery key. Losing both account credentials and recovery material may make encrypted content unrecoverable by design.
+- **Object storage costs:** AWS S3 is not guaranteed to remain free. Monitor storage, requests, data transfer, and multipart-upload leftovers.
+
+## Prerequisites
+
+- Node.js 20 or newer
+- npm 10 or newer
+- Docker Engine/Desktop and Docker Compose
+- An AWS S3 bucket (or a compatible provider, after explicitly configuring and testing the endpoint/credential support)
+
+## Local development with Docker
+
+The repository is an npm-workspaces monorepo. The Compose file is located at `docker/docker-compose.yml`.
+
+### 1. Clone the repository and install dependencies
+
+```bash
+git clone https://github.com/VivekReddy1234/SecureFileSharing.git
+cd SecureFileSharing
+npm ci
 ```
 
-### Cryptographic Non-Negotiables:
-1. **Never Send Plaintext Secrets**: Passwords, raw master keys, unwrapped RSA private keys, and unwrapped file DEKs never leave client memory.
-2. **Fresh 96-bit IV per Encryption**: Nonces are generated using `crypto.getRandomValues(12)` on every operation and are never reused.
-3. **Chunk AAD Binding**: Additional Authenticated Data $\text{AAD} = \text{uint32}(\text{chunkIndex})$ is bound into every chunk's GCM tag, preventing ciphertext splicing and reordering attacks.
-4. **Encrypted Manifest**: Original filenames, MIME types, and file sizes reside inside `encryptedManifest`, encrypted with the file's DEK and stored in Postgres. The server cannot inspect file contents or metadata names.
+### 2. Configure the environment
 
----
-
-## 4. Database Schema Overview
-
-The database uses PostgreSQL managed through Prisma:
-
-- **`User`**: Credentials and cryptographic identity (`authHash`, `authSalt`, `kdfIterations`, `publicKey`, `wrappedPrivateKey`, `recoveryWrappedPrivateKey`).
-- **`RefreshToken`**: Session management with rotation chains (`tokenHash`, `familyId`, `revokedAt`, `replacedByHash`).
-- **`File`**: Storage records (`s3Key`, `encryptedManifest`, `manifestIv`, `sizeBytes`, `status`).
-- **`FileKeyGrant`**: Cryptographic key encapsulation rows (`fileId`, `userId`, `wrappedKey`). One row per grantee.
-- **`FileShare`**: Logical permission rules (`canView`, `canDownload`, `canReshare`, `expiresAt`, `revokedAt`).
-- **`ShareLink`**: Ephemeral public links (`wrappedKey`, `passwordHash`, `maxUses`, `useCount`, `expiresAt`, `revokedAt`).
-- **`AuditLog`**: Append-only security audit entries (`userId`, `eventType`, `resourceId`, `success`, `ipAddress`, `metadata`).
-
----
-
-## 5. Documented File Size Limits
-
-- **Chunk Size**: Fixed at **8 MiB** ($8,388,608$ bytes). Matches S3 multipart upload 5 MiB minimum with headroom.
-- **Multipart Limit**: S3 supports a maximum of 10,000 parts per multipart upload.
-- **Theoretical Maximum**: $10,000 \times 8\text{ MiB} \approx 78.1\text{ GiB}$.
-- **Practical Default Ceiling**: Configured via `MAX_FILE_SIZE_BYTES=5368709120` (**5 GiB**).
-
----
-
-## 6. Security Limitations & Documented Trade-Offs
-
-Per the architecture specification in `SECURITY.md`, the following trade-offs are explicitly documented:
-
-1. **No Server-Side Malware Scanning**: Scanning plaintext for viruses or executing heuristics is cryptographically impossible without sending plaintext to the server, which breaks the zero-knowledge model.
-2. **Metadata Leakage**: The server observes communication graphs (who shares with whom), object sizes rounded to chunk boundaries, IP addresses, and upload/download frequencies.
-3. **Web-Delivered Client Vulnerability**: Delivering client cryptographic JS via the web carries the inherent risk that a compromised server could serve malicious code. This is mitigated through strict Content Security Policy (`script-src 'self'`), HTTP Strict Transport Security (HSTS), and subresource integrity.
-4. **Revocation Boundaries**: Revoking a share or link deletes cryptographic key grants from the server, preventing future downloads. However, revocation cannot cryptographically erase plaintext data already downloaded and decrypted by a recipient prior to revocation.
-5. **Share Link Password Gate**: The server checks passwords against `ShareLink.passwordHash` purely as a rate-limiting convenience to reject invalid attempts early. The true cryptographic gate is client-side key derivation from `#linkSecret` and the passphrase.
-
----
-
-## 7. Environment Setup & Configuration
-
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env` at the repository root, then replace placeholders with development values. Use different random values for `JWT_SECRET` and `JWT_REFRESH_SECRET`; do not use the example placeholders outside local throwaway testing.
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Description | Example |
-| :--- | :--- | :--- |
-| `DATABASE_URL` | PostgreSQL connection URI | `postgresql://ciphervault:ciphervault@localhost:5432/ciphervault?schema=public` |
-| `REDIS_URL` | Redis instance connection URI | `redis://localhost:6379` |
-| `JWT_SECRET` | Secret for access tokens (min 32 chars) | `your-secure-access-token-secret-32-chars-min` |
-| `JWT_REFRESH_SECRET` | Secret for refresh tokens (different from JWT_SECRET) | `your-secure-refresh-token-secret-32-chars-min` |
-| `AWS_REGION` | AWS Region for S3 bucket | `us-east-1` |
-| `AWS_ACCESS_KEY_ID` | AWS IAM Access Key ID | `AKIAIOSFODNN7EXAMPLE` |
-| `AWS_SECRET_ACCESS_KEY` | AWS IAM Secret Access Key | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
-| `AWS_S3_BUCKET` | Dedicated private S3 bucket name | `ciphervault-secure-vault` |
-| `CORS_ORIGIN` | Allowed client origin | `http://localhost:3000` |
-| `NEXT_PUBLIC_API_URL` | Frontend API base URL | `http://localhost:4000` |
-| `MAX_FILE_SIZE_BYTES` | Maximum upload ceiling in bytes | `5368709120` (5 GiB) |
-| `ACCESS_TOKEN_TTL_MINUTES` | Access token lifetime | `15` |
-| `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime | `30` |
+The Compose file reads the root `.env` for variable interpolation and passes the configured values into its containers. The API validates its required variables at startup. For direct `npm run dev:api` execution outside Compose, make sure the variables are actually exported into the shell/process environment; the API does not load the root `.env` file by itself.
 
-### S3 Bucket CORS Configuration
-Configure the bucket CORS policy in the AWS Management Console to allow direct browser multipart uploads:
+**S3 requirement:** The checked-in Compose file starts PostgreSQL, Redis, the API, and the Next.js web app. It does not start a local S3 emulator. The example/mock AWS credentials can let containers start, but they will not make upload/download operations work. Configure a private S3 bucket and valid, least-privilege credentials for functional file transfers.
+
+### 3. Start the services
+
+```bash
+docker compose -f docker/docker-compose.yml up --build -d
+```
+
+To inspect logs:
+
+```bash
+docker compose -f docker/docker-compose.yml logs -f api
+docker compose -f docker/docker-compose.yml logs -f web
+```
+
+Stop the stack:
+
+```bash
+docker compose -f docker/docker-compose.yml down
+```
+
+The Compose file uses a named PostgreSQL volume for local database persistence. `docker compose down -v` removes named volumes and can delete local database contents; do not use it unless you intend to discard the data.
+
+### 4. Initialize the Prisma schema
+
+If the database has not been initialized, run the schema/client setup with the same `DATABASE_URL` that the API uses:
+
+```bash
+npm run db:generate -w apps/api
+npm run db:push -w apps/api
+```
+
+These commands need the database connection string present in the command's environment. For local development through Compose, the API container receives the variables from Compose; if running the Prisma commands from your host, export `DATABASE_URL` in that shell first.
+
+> `db:push` is convenient for development. For important production data, prefer reviewed, versioned Prisma migrations and run them as a controlled deployment step rather than changing schema implicitly on every restart.
+
+### Local endpoints
+
+- Web app: `http://localhost:3000`
+- API: `http://localhost:4000`
+- Liveness check: `http://localhost:4000/health`
+- Readiness check (checks PostgreSQL and Redis): `http://localhost:4000/ready`
+
+## Environment variables
+
+Keep secrets in the hosting provider's environment-variable manager. Never commit `.env` files or paste secrets into issues/screenshots.
+
+| Variable | Required | Purpose |
+|---|---:|---|
+| `DATABASE_URL` | Yes | PostgreSQL connection string, including TLS settings when required by the provider |
+| `REDIS_URL` | Yes | Redis connection URL; use the TLS TCP URL (`rediss://`) when your provider requires TLS |
+| `JWT_SECRET` | Yes | Secret for signing access JWTs; at least 32 characters and randomly generated |
+| `JWT_REFRESH_SECRET` | Yes | Separate random refresh-token-related secret; at least 32 characters |
+| `AWS_REGION` | Yes | Region of the object-storage bucket |
+| `AWS_ACCESS_KEY_ID` | Yes | IAM access key for the application |
+| `AWS_SECRET_ACCESS_KEY` | Yes | Corresponding IAM secret; keep private |
+| `AWS_S3_BUCKET` | Yes | Name of the private S3 bucket |
+| `CORS_ORIGIN` | Yes in production | Exact frontend origin, e.g. `https://your-app.vercel.app`, without a trailing slash |
+| `NEXT_PUBLIC_API_URL` | Yes for hosted frontend | Public API origin, e.g. `https://your-api.onrender.com`; it is embedded into the Next.js client build |
+| `MAX_FILE_SIZE_BYTES` | Optional | API file-size ceiling; defaults to `5368709120` (5 GiB) |
+| `ACCESS_TOKEN_TTL_MINUTES` | Optional | Access-token lifetime; defaults to 15 minutes |
+| `REFRESH_TOKEN_TTL_DAYS` | Optional | Refresh-token lifetime; defaults to 30 days |
+| `NODE_ENV` | Optional | Set to `production` on hosted services |
+| `API_PORT` | Optional | API port; defaults to 4000 |
+| `WEB_PORT` | Optional for Compose | Web port mapping; defaults to 3000 in Compose |
+
+Generate two different random JWT secrets, for example by running the following command twice with Node.js:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```
+
+## Run checks
+
+The root scripts in `package.json` include:
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+Useful package-level commands include:
+
+```bash
+npm run test -w packages/crypto
+npm run test -w packages/shared
+npm run test -w apps/api
+npm run db:generate -w apps/api
+```
+
+Run the relevant tests and build locally before deployment. Do not describe the project as independently security-audited unless such an audit has actually been performed.
+
+## Deployment overview
+
+A common portfolio deployment separates the web app, API, database, Redis, and object storage:
+
+- **Web app:** Vercel (Next.js)
+- **API:** Render or another Node.js host
+- **PostgreSQL:** Neon or another managed PostgreSQL provider
+- **Redis:** Upstash or another Redis-compatible managed provider
+- **Encrypted object storage:** A private AWS S3 bucket
+
+Free-tier quotas and availability change. This stack is not guaranteed to be permanently free: object-storage usage, data transfer, requests, database usage, Redis commands, and hosting limits can incur charges or cause services to sleep. Set billing alerts and usage limits before uploading test files.
+
+### Deployment order
+
+1. Create PostgreSQL and Redis instances in regions close to the API service.
+2. Create a private S3 bucket. Disable public access, use least-privilege IAM permissions, configure bucket CORS for the exact frontend origin, and configure lifecycle cleanup for abandoned multipart uploads.
+3. Deploy the API from the repository root using Node.js 20. Build the `packages/shared` and `packages/crypto` workspaces before generating Prisma Client and building `apps/api`.
+4. Set all backend environment variables listed above in the API host. Set `CORS_ORIGIN` to the deployed web app's exact HTTPS origin.
+5. Apply the Prisma schema/migrations to the managed PostgreSQL database using the same `DATABASE_URL` configured for the API.
+6. Deploy `apps/web` on a Next.js-capable host. Because this is a workspace monorepo, configure the host to install from the root workspace and include the `packages/*` dependencies when building the `apps/web` project.
+7. Set `NEXT_PUBLIC_API_URL` **before the frontend build** to the public API origin, and set `CORS_ORIGIN` in the API to the final frontend origin. Rebuild the frontend after changing this variable.
+8. Test registration/login, refresh-token cookies, CSRF checks, upload, download/decryption, file sharing, share-link expiry/revocation, audit events, and the `/ready` endpoint.
+
+Cross-origin frontend/API deployments require careful cookie and CORS configuration. Confirm that refresh cookies use secure production attributes, the browser sends credentials, the API allows the exact origin with credentials, and the frontend sends the expected CSRF header. Test session refresh in the deployed browser rather than assuming local behavior transfers to production.
+
+### S3 CORS example
+
+Replace the example origin with the actual deployed frontend URL. Keep the bucket private; CORS does not make an S3 bucket private by itself.
 
 ```json
 [
   {
     "AllowedHeaders": ["*"],
     "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
-    "AllowedOrigins": [
-      "http://localhost:3000",
-      "https://YOUR-CIPHERVAULT-FRONTEND.vercel.app"
-    ],
-    "ExposeHeaders": ["ETag", "x-amz-server-side-encryption"]
+    "AllowedOrigins": ["https://YOUR-FRONTEND.example"],
+    "ExposeHeaders": ["ETag"]
   }
 ]
 ```
 
-### Production Deployment Variables
+Do not put S3 credentials in frontend environment variables. The browser should receive only short-lived presigned URLs from the API.
 
-#### Frontend — Vercel
+## Repository hygiene before deployment
 
-```env
-NEXT_PUBLIC_API_URL=https://YOUR-CIPHERVAULT-BACKEND.onrender.com
-```
-
-#### Backend — Render
-
-```env
-DATABASE_URL=postgresql://<neon-user>:<neon-password>@<neon-host>/<database>?sslmode=require
-REDIS_URL=redis://<upstash-username>:<upstash-password>@<upstash-host>:<upstash-port>
-JWT_SECRET=<generate-a-random-secret-at-least-32-characters>
-JWT_REFRESH_SECRET=<generate-a-different-random-secret-at-least-32-characters>
-AWS_REGION=<your-aws-region>
-AWS_ACCESS_KEY_ID=<your-aws-access-key-id>
-AWS_SECRET_ACCESS_KEY=<your-aws-secret-access-key>
-AWS_S3_BUCKET=<your-private-s3-bucket-name>
-CORS_ORIGIN=https://YOUR-CIPHERVAULT-FRONTEND.vercel.app
-MAX_FILE_SIZE_BYTES=5368709120
-ACCESS_TOKEN_TTL_MINUTES=15
-REFRESH_TOKEN_TTL_DAYS=30
-NODE_ENV=production
-API_PORT=4000
-```
-
----
-
-## 8. Development & Docker Orchestration
-
-### Prerequisites
-- Node.js >= 20.0.0
-- Docker & Docker Compose
-- npm >= 10.0.0
-
-### Local Development Setup
-
-1. **Install All Monorepo Dependencies**:
-   ```bash
-   npm install
-   ```
-
-2. **Generate Database Client**:
-   ```bash
-   npx prisma generate --schema=apps/api/prisma/schema.prisma
-   ```
-
-3. **Start Postgres & Redis via Docker**:
-   ```bash
-   docker compose -f docker/docker-compose.yml up -d postgres redis
-   ```
-
-4. **Apply Database Migrations**:
-   ```bash
-   npm run db:push -w apps/api
-   ```
-
-5. **Run in Development Mode**:
-   ```bash
-   # Terminal 1: Backend API (port 4000)
-   npm run dev -w apps/api
-
-   # Terminal 2: Web Frontend (port 3000)
-   npm run dev -w apps/web
-   ```
-
-### Full Stack Docker Deployment
-Run the complete stack (Postgres, Redis, API, and Next.js Web) in isolated containers with healthcheck coordination:
+**Required:** The current repository tree contains a `.pgdata/` directory with PostgreSQL internal database files. A database data directory should not be committed to a public Git repository. Back up anything needed, add `.pgdata/` to `.gitignore`, and remove it from Git tracking before deploying:
 
 ```bash
-docker compose -f docker/docker-compose.yml up --build -d
+echo .pgdata/ >> .gitignore
+git rm -r --cached .pgdata
+git add .gitignore
+git commit -m "chore: stop tracking local PostgreSQL data"
+git push origin main
 ```
 
-Verify service health:
-```bash
-curl http://localhost:4000/health
-curl http://localhost:4000/ready
-```
+These commands remove the directory from future repository snapshots while leaving your local files in place. Because the files have already been published, review whether they contain personal or sensitive data; if so, rotate exposed credentials and consider purging the files from Git history as well. Do not delete your only local database copy before confirming whether you need it.
 
----
+## Known limitations and hardening checklist
 
-## 9. Running Verification & Test Suites
+- **Not independently audited:** Cryptographic correctness, key lifecycle, recovery, share-link handling, authorization, and browser threat models need independent review before production use.
+- **Documentation drift:** Keep `README.md`, `ARCHITECTURE.md`, and `SECURITY.md` aligned with the code. The architecture document has historically differed from the implementation documentation on cryptographic parameters; the current crypto source uses RSA-OAEP 3072-bit with SHA-256 and PBKDF2-HMAC-SHA256 with a minimum of 600,000 iterations.
+- **S3 cost and lifecycle:** Configure budgets/alerts and lifecycle cleanup for abandoned multipart uploads. Test failed upload cleanup, deletion failure handling, and orphaned-object reconciliation.
+- **Recovery path:** Test account recovery from a clean browser/device and document what is unrecoverable when the recovery key is lost.
+- **Rate limits and abuse:** Test upload initiation, presigned URL creation, share-link password attempts, account registration, and expensive cryptographic operations under abuse scenarios.
+- **Audit hygiene:** Ensure logs contain no secrets, plaintext filenames, plaintext file content, auth keys, raw refresh tokens, or unwrapped cryptographic keys.
+- **Deployment secrets:** Remove sample/default credentials from production, use least-privilege IAM, rotate secrets when exposed, and keep private buckets private.
+- **Backups and migrations:** Verify database backups and restore procedures; use versioned Prisma migrations for production changes.
+- **Security headers:** Review CSP for the exact frontend/API/S3 origins and test real upload/download flows after tightening it.
+- **Licensing:** The README previously claimed Apache-2.0, but a root `LICENSE` file was not present in the repository listing inspected for this README. Add the license text you intend to use before redistributing the project under that license.
 
-The platform includes comprehensive test suites across unit, cryptographic, and security layers:
+## License
 
-```bash
-# 1. Typecheck the entire monorepo
-npm run typecheck
-
-# 2. Run all cryptographic tests (AES-GCM, RSA-OAEP, PBKDF2, HKDF, AAD, nonces)
-npm run test -w packages/crypto
-
-# 3. Run shared schema validation tests
-npm run test -w packages/shared
-
-# 4. Run API security & unit tests (IDOR, role escalation, JWT tampering, Argon2id)
-npm run test -w apps/api
-
-# 5. Build all packages and applications for production
-npm run build
-```
-
----
-
-## 10. License
-
-Apache-2.0. See `LICENSE` for details.
+A root `LICENSE` file was not found when this README was prepared. Add the intended license file and update this section once the licensing choice is confirmed.
