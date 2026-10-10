@@ -60,6 +60,7 @@ export default function ShareLinkPage({ params }: { params: { linkId: string } }
 
   useEffect(() => {
     loadLink();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.linkId]);
 
   const handleDownload = async () => {

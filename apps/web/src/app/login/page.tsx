@@ -49,7 +49,7 @@ export default function Login() {
             {loading ? 'Decrypting...' : 'Sign in'}
           </button>
           <div className="text-center text-sm">
-            <Link href="/register" className="text-indigo-600 hover:text-indigo-500">Don't have an account? Register</Link>
+            <Link href="/register" className="text-indigo-600 hover:text-indigo-500">Don&apos;t have an account? Register</Link>
           </div>
         </form>
       </div>
