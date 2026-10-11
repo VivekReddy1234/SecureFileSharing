@@ -1,12 +1,4 @@
 
-rewrites: async () => [
-  {
-    source: '/api/backend/:path*',
-    destination: 'https://securefilesharing-hy08.onrender.com/:path*',
-  },
-],
-
-
 const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 let apiOrigin = 'http://localhost:4000';
@@ -18,15 +10,16 @@ try {
   parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
   apiWebSocketOrigin = parsed.origin;
 } catch {
-  // Keep secure localhost fallbacks for malformed env values
+  // Relative URLs such as /api/backend use the same origin.
 }
 
 const connectSrc = [
   "'self'",
   apiOrigin,
   apiWebSocketOrigin,
-  "https://cipher-vault-s3-bucket.s3.ap-southeast-2.amazonaws.com"
+  'https://cipher-vault-s3-bucket.s3.ap-southeast-2.amazonaws.com',
 ];
+
 if (process.env.NODE_ENV !== 'production') {
   connectSrc.push('ws://localhost:3000');
 }
@@ -35,7 +28,20 @@ if (process.env.NODE_ENV !== 'production') {
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  headers: async () => {
+
+  // Proxy API calls through the Vercel domain so the browser
+  // can use a same-origin cookie instead of a third-party cookie.
+  async rewrites() {
+    return [
+      {
+        source: '/api/backend/:path*',
+        destination:
+          'https://securefilesharing-hy08.onrender.com/:path*',
+      },
+    ];
+  },
+
+  async headers() {
     return [
       {
         source: '/:path*',
@@ -58,7 +64,8 @@ const nextConfig = {
           },
           {
             key: 'Permissions-Policy',
-            value: 'camera=(), microphone=(), geolocation=(), browsing-topics=()',
+            value:
+              'camera=(), microphone=(), geolocation=(), browsing-topics=()',
           },
           {
             key: 'Strict-Transport-Security',
