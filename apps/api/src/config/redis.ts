@@ -4,7 +4,7 @@ import { logger } from './logger';
 
 export const redis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: 1,
-  enableOfflineQueue: false,
+  enableOfflineQueue: true,
   retryStrategy(times) {
     if (times > 3 && env.NODE_ENV !== 'production') {
       return null; // Stop reconnection loop if Redis is absent in local dev
