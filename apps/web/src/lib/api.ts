@@ -1,3 +1,4 @@
+
 import {
   AuthRegisterRequest,
   AuthLoginRequest,
@@ -35,11 +36,54 @@ export const setAccessToken = (token: string | null) => {
 
 export const getAccessToken = () => memoryAccessToken;
 
-async function fetchWithAuth<T = unknown>(url: string, options: RequestInit = {}): Promise<T> {
+// Share one refresh request between all callers. The server rotates refresh
+// tokens, so concurrent refresh calls using the same cookie can invalidate
+// the session.
+let refreshPromise: Promise<AuthRefreshResponse> | null = null;
+
+async function refreshAccessToken(): Promise<AuthRefreshResponse> {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      const response = await fetch(`${NEXT_PUBLIC_API_URL}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'CipherVault' },
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        let message = 'Session refresh failed';
+        try {
+          const body = await response.json();
+          message = body.error?.message || body.message || message;
+        } catch {
+          message = response.statusText || message;
+        }
+        throw new Error(message);
+      }
+
+      const data = (await response.json()) as AuthRefreshResponse;
+      setAccessToken(data.accessToken);
+      return data;
+    })().finally(() => {
+      refreshPromise = null;
+    });
+  }
+
+  return refreshPromise;
+}
+
+async function fetchWithAuth<T = unknown>(
+  url: string,
+  options: RequestInit = {}
+): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set('X-Requested-With', 'CipherVault');
 
-  if (!headers.has('Content-Type') && options.body && typeof options.body === 'string') {
+  if (
+    !headers.has('Content-Type') &&
+    options.body &&
+    typeof options.body === 'string'
+  ) {
     headers.set('Content-Type', 'application/json');
   }
 
@@ -50,28 +94,23 @@ async function fetchWithAuth<T = unknown>(url: string, options: RequestInit = {}
   const reqOptions: RequestInit = {
     ...options,
     headers,
-    credentials: 'include', // for refresh token httpOnly cookie
+    credentials: 'include',
   };
 
   let res = await fetch(`${NEXT_PUBLIC_API_URL}${url}`, reqOptions);
 
-  if (res.status === 401 && !url.includes('/auth/login') && !url.includes('/auth/refresh')) {
-    // Try silent refresh
+  if (
+    res.status === 401 &&
+    !url.includes('/auth/login') &&
+    !url.includes('/auth/refresh')
+  ) {
     try {
-      const refreshRes = await fetch(`${NEXT_PUBLIC_API_URL}/auth/refresh`, {
-        method: 'POST',
-        headers: { 'X-Requested-With': 'CipherVault' },
-        credentials: 'include',
-      });
-      if (refreshRes.ok) {
-        const data: AuthRefreshResponse = await refreshRes.json();
-        setAccessToken(data.accessToken);
-        headers.set('Authorization', `Bearer ${data.accessToken}`);
-        reqOptions.headers = headers;
-        res = await fetch(`${NEXT_PUBLIC_API_URL}${url}`, reqOptions);
-      } else {
-        setAccessToken(null);
-      }
+      const data = await refreshAccessToken();
+
+      headers.set('Authorization', `Bearer ${data.accessToken}`);
+      reqOptions.headers = headers;
+
+      res = await fetch(`${NEXT_PUBLIC_API_URL}${url}`, reqOptions);
     } catch {
       setAccessToken(null);
     }
@@ -79,12 +118,15 @@ async function fetchWithAuth<T = unknown>(url: string, options: RequestInit = {}
 
   if (!res.ok) {
     let errorMsg = 'API Error';
+
     try {
       const errorData = await res.json();
-      errorMsg = errorData.error?.message || errorData.message || errorMsg;
+      errorMsg =
+        errorData.error?.message || errorData.message || errorMsg;
     } catch {
       errorMsg = res.statusText || errorMsg;
     }
+
     throw new Error(errorMsg);
   }
 
@@ -97,9 +139,10 @@ async function fetchWithAuth<T = unknown>(url: string, options: RequestInit = {}
 
 export const api = {
   getSalt: (email: string) =>
-    fetchWithAuth<AuthSaltResponse>(`/auth/salt?email=${encodeURIComponent(email.toLowerCase().trim())}`, {
-      method: 'GET',
-    }),
+    fetchWithAuth<AuthSaltResponse>(
+      `/auth/salt?email=${encodeURIComponent(email.toLowerCase().trim())}`,
+      { method: 'GET' }
+    ),
 
   register: (data: AuthRegisterRequest) =>
     fetchWithAuth<{ id: string; email: string }>('/auth/register', {
@@ -113,10 +156,7 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  refresh: () =>
-    fetchWithAuth<AuthRefreshResponse>('/auth/refresh', {
-      method: 'POST',
-    }),
+  refresh: () => refreshAccessToken(),
 
   logout: () =>
     fetchWithAuth<{ success: boolean }>('/auth/logout', {
@@ -130,14 +170,13 @@ export const api = {
     }),
 
   getMe: () =>
-    fetchWithAuth<UserProfile>('/users/me', {
-      method: 'GET',
-    }),
+    fetchWithAuth<UserProfile>('/users/me', { method: 'GET' }),
 
   lookupUser: (email: string) =>
-    fetchWithAuth<UserPublicInfo>(`/users/lookup?email=${encodeURIComponent(email)}`, {
-      method: 'GET',
-    }),
+    fetchWithAuth<UserPublicInfo>(
+      `/users/lookup?email=${encodeURIComponent(email)}`,
+      { method: 'GET' }
+    ),
 
   initUpload: (data: FileInitUploadRequest) =>
     fetchWithAuth<FileInitUploadResponse>('/files/init-upload', {
@@ -146,19 +185,24 @@ export const api = {
     }),
 
   completeUpload: (fileId: string, data: FileCompleteUploadRequest) =>
-    fetchWithAuth<FileCompleteUploadResponse>(`/files/${fileId}/complete-upload`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
+    fetchWithAuth<FileCompleteUploadResponse>(
+      `/files/${fileId}/complete-upload`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    ),
 
   getFiles: (cursor?: string, limit?: number) => {
     const params = new URLSearchParams();
     if (cursor) params.append('cursor', cursor);
     if (limit) params.append('limit', limit.toString());
     const query = params.toString() ? `?${params.toString()}` : '';
-    return fetchWithAuth<PaginatedResponse<FileListItem>>(`/files${query}`, {
-      method: 'GET',
-    });
+
+    return fetchWithAuth<PaginatedResponse<FileListItem>>(
+      `/files${query}`,
+      { method: 'GET' }
+    );
   },
 
   getFile: (id: string) =>
@@ -172,19 +216,16 @@ export const api = {
       encryptedManifestBase64: string;
       manifestIvBase64: string;
       wrappedKeyBase64: string;
-    }>(`/files/${id}`, {
-      method: 'GET',
-    }),
+    }>(`/files/${id}`, { method: 'GET' }),
 
   getDownloadUrl: (id: string) =>
-    fetchWithAuth<FileDownloadUrlResponse>(`/files/${id}/download-url`, {
-      method: 'GET',
-    }),
+    fetchWithAuth<FileDownloadUrlResponse>(
+      `/files/${id}/download-url`,
+      { method: 'GET' }
+    ),
 
   deleteFile: (id: string) =>
-    fetchWithAuth<void>(`/files/${id}`, {
-      method: 'DELETE',
-    }),
+    fetchWithAuth<void>(`/files/${id}`, { method: 'DELETE' }),
 
   createShare: (fileId: string, data: ShareCreateRequest) =>
     fetchWithAuth<ShareResponse>(`/files/${fileId}/shares`, {
@@ -198,36 +239,39 @@ export const api = {
     }),
 
   revokeShare: (shareId: string) =>
-    fetchWithAuth<void>(`/shares/${shareId}`, {
-      method: 'DELETE',
-    }),
+    fetchWithAuth<void>(`/shares/${shareId}`, { method: 'DELETE' }),
 
   createShareLink: (fileId: string, data: ShareLinkCreateRequest) =>
-    fetchWithAuth<ShareLinkCreateResponse>(`/files/${fileId}/share-links`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
+    fetchWithAuth<ShareLinkCreateResponse>(
+      `/files/${fileId}/share-links`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    ),
 
   accessShareLink: (linkId: string, password?: string) => {
     const query = password ? `?password=${encodeURIComponent(password)}` : '';
-    return fetchWithAuth<ShareLinkAccessResponse>(`/share-links/${linkId}${query}`, {
-      method: 'GET',
-    });
+
+    return fetchWithAuth<ShareLinkAccessResponse>(
+      `/share-links/${linkId}${query}`,
+      { method: 'GET' }
+    );
   },
 
   revokeShareLink: (linkId: string) =>
-    fetchWithAuth<void>(`/share-links/${linkId}`, {
-      method: 'DELETE',
-    }),
+    fetchWithAuth<void>(`/share-links/${linkId}`, { method: 'DELETE' }),
 
   getAuditLog: (cursor?: string, limit?: number) => {
     const params = new URLSearchParams();
     if (cursor) params.append('cursor', cursor);
     if (limit) params.append('limit', limit.toString());
     const query = params.toString() ? `?${params.toString()}` : '';
-    return fetchWithAuth<PaginatedResponse<AuditLogEntry>>(`/audit${query}`, {
-      method: 'GET',
-    });
+
+    return fetchWithAuth<PaginatedResponse<AuditLogEntry>>(
+      `/audit${query}`,
+      { method: 'GET' }
+    );
   },
 
   adminGetUsers: (cursor?: string, limit?: number) => {
@@ -235,9 +279,11 @@ export const api = {
     if (cursor) params.append('cursor', cursor);
     if (limit) params.append('limit', limit.toString());
     const query = params.toString() ? `?${params.toString()}` : '';
-    return fetchWithAuth<PaginatedResponse<AdminUserListItem>>(`/admin/users${query}`, {
-      method: 'GET',
-    });
+
+    return fetchWithAuth<PaginatedResponse<AdminUserListItem>>(
+      `/admin/users${query}`,
+      { method: 'GET' }
+    );
   },
 
   adminUpdateUser: (id: string, data: AdminUserUpdateRequest) =>
@@ -251,8 +297,10 @@ export const api = {
     if (cursor) params.append('cursor', cursor);
     if (limit) params.append('limit', limit.toString());
     const query = params.toString() ? `?${params.toString()}` : '';
-    return fetchWithAuth<PaginatedResponse<AuditLogEntry>>(`/admin/audit${query}`, {
-      method: 'GET',
-    });
+
+    return fetchWithAuth<PaginatedResponse<AuditLogEntry>>(
+      `/admin/audit${query}`,
+      { method: 'GET' }
+    );
   },
 };
