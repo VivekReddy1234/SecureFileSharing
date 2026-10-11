@@ -1,3 +1,12 @@
+
+rewrites: async () => [
+  {
+    source: '/api/backend/:path*',
+    destination: 'https://securefilesharing-hy08.onrender.com/:path*',
+  },
+],
+
+
 const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 let apiOrigin = 'http://localhost:4000';
