@@ -12,7 +12,12 @@ try {
   // Keep secure localhost fallbacks for malformed env values
 }
 
-const connectSrc = ["'self'", apiOrigin, apiWebSocketOrigin];
+const connectSrc = [
+  "'self'",
+  apiOrigin,
+  apiWebSocketOrigin,
+  "https://cipher-vault-s3-bucket.s3.ap-southeast-2.amazonaws.com"
+];
 if (process.env.NODE_ENV !== 'production') {
   connectSrc.push('ws://localhost:3000');
 }
